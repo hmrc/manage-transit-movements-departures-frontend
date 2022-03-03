@@ -1,123 +1,139 @@
+/*
+ * Copyright 2022 HM Revenue & Customs
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package repositories
 
-import config.FrontendAppConfig
-import models.UserAnswers
-import org.mockito.Mockito.when
-import org.mongodb.scala.model.Filters
-import org.scalatest.OptionValues
-import org.scalatest.concurrent.{IntegrationPatience, ScalaFutures}
-import org.scalatest.freespec.AnyFreeSpec
-import org.scalatest.matchers.must.Matchers
-import org.scalatestplus.mockito.MockitoSugar
+import itSpecBase.ItSpecBase
+import itUtils.MockDateTimeService
+import models.{EoriNumber, LocalReferenceNumber, UserAnswers}
+import org.scalatest.concurrent.IntegrationPatience
+import org.scalatest.{BeforeAndAfterEach, OptionValues}
+import org.scalatestplus.play.guice.GuiceOneAppPerSuite
 import play.api.libs.json.Json
-import uk.gov.hmrc.mongo.test.DefaultPlayMongoRepositorySupport
+import reactivemongo.api.indexes.IndexType
+import reactivemongo.core.errors.DatabaseException
+import reactivemongo.play.json.collection.JSONCollection
 
-import java.time.{Clock, Instant, ZoneId}
 import scala.concurrent.ExecutionContext.Implicits.global
 
-class SessionRepositorySpec
-  extends AnyFreeSpec
-    with Matchers
-    with DefaultPlayMongoRepositorySupport[UserAnswers]
-    with ScalaFutures
-    with IntegrationPatience
-    with OptionValues
-    with MockitoSugar {
+class SessionRepositorySpec extends ItSpecBase
+  with ItMongoSuite
+  with BeforeAndAfterEach
+  with GuiceOneAppPerSuite
+  with MockDateTimeService
+  with FailOnUnindexedQueries
+  with OptionValues
+  with IntegrationPatience {
 
-  private val instant = Instant.now
-  private val stubClock: Clock = Clock.fixed(instant, ZoneId.systemDefault)
+  private val service = app.injector.instanceOf[SessionRepository]
 
-  private val userAnswers = UserAnswers("id", Json.obj("foo" -> "bar"), Instant.ofEpochSecond(1))
+  private val userAnswer1 = UserAnswers(LocalReferenceNumber("ABCD1111111111111").get, EoriNumber("EoriNumber1"), Json.obj("foo" -> "bar"))
+  private val userAnswer2 = UserAnswers(LocalReferenceNumber("ABCD2222222222222").get, EoriNumber("EoriNumber2"), Json.obj("bar" -> "foo"))
 
-  private val mockAppConfig = mock[FrontendAppConfig]
-  when(mockAppConfig.cacheTtl) thenReturn 1
-
-  protected override val repository = new SessionRepository(
-    mongoComponent = mongoComponent,
-    appConfig      = mockAppConfig,
-    clock          = stubClock
+  val eoriIndex = SimpleMongoIndexConfig(
+    key = Seq("eoriNumber" -> IndexType.Ascending, "lrn" -> IndexType.Ascending),
+    name = Some("eoriNumber-lrn-index")
   )
 
-  ".set" - {
-
-    "must set the last updated time on the supplied user answers to `now`, and save them" in {
-
-      val expectedResult = userAnswers copy (lastUpdated = instant)
-
-      val setResult     = repository.set(userAnswers).futureValue
-      val updatedRecord = find(Filters.equal("_id", userAnswers.id)).futureValue.headOption.value
-
-      setResult mustEqual true
-      updatedRecord mustEqual expectedResult
-    }
+  override def beforeEach(): Unit = {
+    super.beforeEach()
+    database.flatMap {
+      db =>
+        val jsonCollection = db.collection[JSONCollection]("user-answers")
+        jsonCollection.indexesManager.create(eoriIndex).flatMap {
+          _ =>
+            jsonCollection
+              .insert(ordered = false)
+              .many(Seq(userAnswer1, userAnswer2))
+        }
+    }.futureValue
   }
 
-  ".get" - {
+  override def afterEach(): Unit = {
+    super.afterEach()
+    database.flatMap(_.drop())
+  }
 
-    "when there is a record for this id" - {
+  "SessionRepository" - {
 
-      "must update the lastUpdated time and get the record" in {
+    "get" - {
 
-        insert(userAnswers).futureValue
+      "must return UserAnswers when given an LocalReferenceNumber and EoriNumber" in {
 
-        val result         = repository.get(userAnswers.id).futureValue
-        val expectedResult = userAnswers copy (lastUpdated = instant)
+        val result = service.get(LocalReferenceNumber("ABCD1111111111111").get, EoriNumber("EoriNumber1")).futureValue
 
-        result.value mustEqual expectedResult
+        result.value.lrn        mustBe userAnswer1.lrn
+        result.value.eoriNumber mustBe userAnswer1.eoriNumber
+        result.value.data       mustBe userAnswer1.data
+      }
+
+      "must return None when no UserAnswers match LocalReferenceNumber" in {
+
+        val result = service.get(LocalReferenceNumber("ABCD3333333333333").get, EoriNumber("EoriNumber1")).futureValue
+
+        result mustBe None
+      }
+
+      "must return None when no UserAnswers match EoriNumber" in {
+
+        val result = service.get(LocalReferenceNumber("ABCD1111111111111").get, EoriNumber("InvalidEori")).futureValue
+
+        result mustBe None
       }
     }
 
-    "when there is no record for this id" - {
+    "set" - {
 
-      "must return None" in {
+      "must create new document when given valid UserAnswers" in {
 
-        repository.get("id that does not exist").futureValue must not be defined
+        val userAnswer = UserAnswers(LocalReferenceNumber("ABCD3333333333333").get, EoriNumber("EoriNumber3"), Json.obj("foo" -> "bar"))
+
+        val setResult = service.set(userAnswer).futureValue
+
+        val getResult = service.get(LocalReferenceNumber("ABCD3333333333333").get, EoriNumber("EoriNumber3")).futureValue.value
+
+
+        setResult            mustBe true
+        getResult.lrn        mustBe userAnswer.lrn
+        getResult.eoriNumber mustBe userAnswer.eoriNumber
+        getResult.data       mustBe userAnswer.data
       }
-    }
-  }
 
-  ".clear" - {
+      "must fail when attempting to create using an existing id" in {
 
-    "must remove a record" in {
+        val userAnswer = UserAnswers(LocalReferenceNumber("ABCD1111111111111").get, EoriNumber("EoriNumber1"), Json.obj("foo" -> "bar"))
 
-      insert(userAnswers).futureValue
+        val setResult = service.set(userAnswer)
 
-      val result = repository.clear(userAnswers.id).futureValue
-
-      result mustEqual true
-      repository.get(userAnswers.id).futureValue must not be defined
-    }
-
-    "must return true when there is no record to remove" in {
-      val result = repository.clear("id that does not exist").futureValue
-
-      result mustEqual true
-    }
-  }
-
-  ".keepAlive" - {
-
-    "when there is a record for this id" - {
-
-      "must update its lastUpdated to `now` and return true" in {
-
-        insert(userAnswers).futureValue
-
-        val result = repository.keepAlive(userAnswers.id).futureValue
-
-        val expectedUpdatedAnswers = userAnswers copy (lastUpdated = instant)
-
-        result mustEqual true
-        val updatedAnswers = find(Filters.equal("_id", userAnswers.id)).futureValue.headOption.value
-        updatedAnswers mustEqual expectedUpdatedAnswers
+        whenReady(setResult.failed) {
+          e =>
+            e mustBe an[DatabaseException]
+        }
       }
     }
 
-    "when there is no record for this id" - {
+    "remove" - {
 
-      "must return true" in {
+      "must remove document when given a valid LocalReferenceNumber and EoriNumber" in {
 
-        repository.keepAlive("id that does not exist").futureValue mustEqual true
+        service.get(LocalReferenceNumber("ABCD1111111111111").get, EoriNumber("EoriNumber1")).futureValue mustBe defined
+
+        service.remove(LocalReferenceNumber("ABCD1111111111111").get, EoriNumber("EoriNumber1")).futureValue
+
+        service.get(LocalReferenceNumber("ABCD1111111111111").get, EoriNumber("EoriNumber1")).futureValue must not be defined
       }
     }
   }

@@ -1,16 +1,32 @@
+/*
+ * Copyright 2022 HM Revenue & Customs
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package forms.mappings
+
+import generators.Generators
+import models.reference.CountryCode
+import org.scalacheck.Gen
+import org.scalatest.freespec.AnyFreeSpec
+import org.scalatest.matchers.must.Matchers
+import org.scalatestplus.scalacheck.ScalaCheckPropertyChecks
+import play.api.data.validation.{Invalid, Valid}
 
 import java.time.LocalDate
 
-import generators.Generators
-import org.scalacheck.Gen
-import org.scalatestplus.scalacheck.ScalaCheckPropertyChecks
-import org.scalatest.freespec.AnyFreeSpec
-import org.scalatest.matchers.must.Matchers
-import play.api.data.validation.{Invalid, Valid}
-
-class ConstraintsSpec extends AnyFreeSpec with Matchers with ScalaCheckPropertyChecks with Generators  with Constraints {
-
+class ConstraintsSpec extends AnyFreeSpec with Matchers with ScalaCheckPropertyChecks with Generators with Constraints {
 
   "firstError" - {
 
@@ -82,6 +98,11 @@ class ConstraintsSpec extends AnyFreeSpec with Matchers with ScalaCheckPropertyC
       val result = regexp("""^\d+$""", "error.invalid")("foo")
       result mustEqual Invalid("error.invalid", """^\d+$""")
     }
+
+    "must return Invalid for an input that does not match the expression with the given args" in {
+      val result = regexp("""^\d+$""", "error.invalid", "frank")("foo")
+      result mustEqual Invalid("error.invalid", "frank")
+    }
   }
 
   "maxLength" - {
@@ -118,7 +139,6 @@ class ConstraintsSpec extends AnyFreeSpec with Matchers with ScalaCheckPropertyC
 
       forAll(gen) {
         case (max, date) =>
-
           val result = maxDate(max, "error.future")(date)
           result mustEqual Valid
       }
@@ -133,7 +153,6 @@ class ConstraintsSpec extends AnyFreeSpec with Matchers with ScalaCheckPropertyC
 
       forAll(gen) {
         case (max, date) =>
-
           val result = maxDate(max, "error.future", "foo")(date)
           result mustEqual Invalid("error.future", "foo")
       }
@@ -151,7 +170,6 @@ class ConstraintsSpec extends AnyFreeSpec with Matchers with ScalaCheckPropertyC
 
       forAll(gen) {
         case (min, date) =>
-
           val result = minDate(min, "error.past", "foo")(date)
           result mustEqual Valid
       }
@@ -166,10 +184,26 @@ class ConstraintsSpec extends AnyFreeSpec with Matchers with ScalaCheckPropertyC
 
       forAll(gen) {
         case (min, date) =>
-
           val result = minDate(min, "error.past", "foo")(date)
           result mustEqual Invalid("error.past", "foo")
       }
     }
   }
+  "prefix" - {
+    "must return valid if not a Simplified journey" in {
+      val result = isSimplified(false, CountryCode("GB"), "test")("GB")
+      result mustEqual Valid
+    }
+
+    "must return Invalid For a Simplified journey" in {
+      val result = isSimplified(true, CountryCode("GB"), "test")("XI")
+      result mustEqual Invalid("test", "GB")
+    }
+
+    "must return Valid For a Simplified journey" in {
+      val result = isSimplified(true, CountryCode("GB"), "test")("GB")
+      result mustEqual Valid
+    }
+  }
+
 }
