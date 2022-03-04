@@ -33,3 +33,11 @@ bin
 /*.ipr
 /.classpath
 *.iws
+migrations
+.bloop/
+.bsp
+.metals/
+.vscode/
+project/metals.sbt
+.hydra
+/.bsp/sbt.json
